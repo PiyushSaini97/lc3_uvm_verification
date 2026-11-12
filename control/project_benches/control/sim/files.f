@@ -1,0 +1,21 @@
+-work work
++incdir+../rtl
+../rtl/data_defs.v
+../rtl/Controller_Pipeline.v
++incdir+../../../verification_ip/environment_packages/lc3_prediction_pkg
+../../../verification_ip/environment_packages/lc3_prediction_pkg/lc3_prediction_pkg.sv
++incdir+../../../verification_ip/interface_packages/control_in_pkg
+../../../verification_ip/interface_packages/control_in_pkg/control_in_pkg.sv
+../../../verification_ip/interface_packages/control_in_pkg/src/control_in_if.sv
+../../../verification_ip/interface_packages/control_in_pkg/src/control_in_driver_bfm.sv
+../../../verification_ip/interface_packages/control_in_pkg/src/control_in_monitor_bfm.sv
++incdir+../../../verification_ip/interface_packages/control_out_pkg
+../../../verification_ip/interface_packages/control_out_pkg/control_out_pkg.sv
+../../../verification_ip/interface_packages/control_out_pkg/src/control_out_if.sv
+../../../verification_ip/interface_packages/control_out_pkg/src/control_out_monitor_bfm.sv
++incdir+../../../verification_ip/environment_packages/control_env_pkg
+../../../verification_ip/environment_packages/control_env_pkg/control_env_pkg.sv
++incdir+../tb/tests
+../tb/tests/control_test_pkg.sv
+../tb/testbench/hdl_top.sv
+../tb/testbench/hvl_top.sv
