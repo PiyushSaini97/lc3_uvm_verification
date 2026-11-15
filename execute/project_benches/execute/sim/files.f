@@ -1,0 +1,21 @@
+-work work
++incdir+../rtl
+../rtl/data_defs.v
+../rtl/Execute.v
++incdir+../../../verification_ip/environment_packages/lc3_prediction_pkg
+../../../verification_ip/environment_packages/lc3_prediction_pkg/lc3_prediction_pkg.sv
++incdir+../../../verification_ip/interface_packages/execute_in_pkg
+../../../verification_ip/interface_packages/execute_in_pkg/execute_in_pkg.sv
+../../../verification_ip/interface_packages/execute_in_pkg/src/execute_in_if.sv
+../../../verification_ip/interface_packages/execute_in_pkg/src/execute_in_driver_bfm.sv
+../../../verification_ip/interface_packages/execute_in_pkg/src/execute_in_monitor_bfm.sv
++incdir+../../../verification_ip/interface_packages/execute_out_pkg
+../../../verification_ip/interface_packages/execute_out_pkg/execute_out_pkg.sv
+../../../verification_ip/interface_packages/execute_out_pkg/src/execute_out_if.sv
+../../../verification_ip/interface_packages/execute_out_pkg/src/execute_out_monitor_bfm.sv
++incdir+../../../verification_ip/environment_packages/execute_env_pkg
+../../../verification_ip/environment_packages/execute_env_pkg/execute_env_pkg.sv
++incdir+../tb/tests
+../tb/tests/execute_test_pkg.sv
+../tb/testbench/hdl_top.sv
+../tb/testbench/hvl_top.sv
