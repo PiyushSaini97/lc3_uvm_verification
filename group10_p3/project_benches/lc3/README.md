@@ -21,7 +21,7 @@ make lc3_debug                        # GUI, loads wave.do, runs test_top to the
 make lc3_batch                        # batch, saves <TESTNAME>.ucdb
 make lc3_batch TESTNAME=lc3_sweep_test   # any test from "Tests" below
 make lc3_debug INSTRS=20000           # instruction fetches before stopping (default per test)
-make lc3_batch MIX=10,60,10,5,5,5,5   # test_top snippet weights (see "Stimulus")
+make lc3_batch MIX=10,60,10,5,5,5,5   # test_top snippet weights, up to 13 values (see "Stimulus")
 make lc3_debug VERBOSITY=UVM_HIGH     # print every transaction and match
 make clean                            # run this after changing any file
 ```
@@ -97,7 +97,7 @@ What a test selects lives in `tb/sequences/lc3_sequence_pkg`:
 
 **Prologue:** `AND Rk,Rk,#0` for all eight registers, then R0 again. Registers are X after reset, and a JMP, LDR or STR through an X register would trip the memory BFMs' "unknown request" `$fatal` checks. The first word equals the IMEM driver BFM's preloaded `0x5020`.
 
-**`test_top` snippets** (default weights in brackets; change them with `MIX=` in the order shown):
+**`test_top` snippets** (default weights in brackets; change them with `MIX=` in the order shown, 13 values; entries you leave out keep their default):
 
 | Snippet | What it emits | What it targets |
 |---|---|---|
@@ -108,12 +108,18 @@ What a test selects lives in `tb/sequences/lc3_sequence_pkg`:
 | JUMP [6] | JMP to `0000/7FFF/8000/FFFE/FFFF`, then PC-relative LEA/LD/ST whose result or address is `0000` or `FFFF` | `jmp_cg`; in the pipeline, PC and address corners 0000/FFFF |
 | MEM_CORNER [8] | Base register `0000` or `FFFF`; STR/LDR at the corner and one step across it (wraps); store data is a corner | LDR/STR offsets; in the pipeline, data-address wraparound at 0000/FFFF |
 | INDIRECT [8] | LDI/STI, including STI of a corner value | LDI/STI; in the pipeline, both indirect memory-FSM sequences |
+| BYPASS_DIST [18] | Producer of any class (ALU, load, LEA), 0–2 ALU fillers, then a consumer | `bypass_sr1_cg`, `bypass_sr2_cg` |
+| DUAL [8] | Two producers (0–1 filler between), then one instruction reading one register from each | `mixed_bypass_cg` |
+| CHAIN [8] | A producer, then 2–6 ALU instructions that each read the one before | `chain_cg` |
+| MEM_BURST [10] | 2–6 memory instructions of random kinds, 0–2 ALU instructions between | `mem_pair_cg`, `mem_run_cg` |
+| BRANCH_HIST [14] | A register writer of any class, 0–3 NOPs, then BR with any condition | `branch_history_cg` |
+| WAW [6] | Two writers of the same register, 0–1 instruction apart | `waw_cg` |
 
 All words are legal by construction. `0x0000` is never produced (see `known_dut_bug_c`); the NOP is `BR` with condition `000` and offset 1.
 
-## Instruction coverage (`imem_coverage`)
+## Instruction coverage (`imem_coverage`, `imem_pipeline_coverage`)
 
-One coverage component, in the instruction-memory agent (`imem_pkg/src/imem_coverage.svh`), sampling every fetched word. `imem_configuration.has_coverage` (default 1) turns it on, and the agent creates it through the factory, so another model can be dropped in without editing the bench:
+Two coverage components, both in the instruction-memory agent (`imem_pkg/src/imem_coverage.svh` and `imem_pkg/src/imem_pipeline_coverage.svh`), sampling every fetched word. `imem_coverage` looks at one word at a time; `imem_pipeline_coverage` (below) looks at the words before it. `imem_configuration.has_coverage` (default 1) turns it on, and the agent creates it through the factory, so another model can be dropped in without editing the bench:
 
 ```
 imem_coverage::type_id::set_type_override(other_coverage::get_type());
@@ -145,7 +151,22 @@ It sits at the memory agent because that is where every word the stimulus sends 
 
 `report_phase` prints every group and the average (`IMEM_COVERAGE` in the transcript).
 
-**What closes what.** The nine exhaustive crosses (`alu_imm_cg` … `jmp_cg`, 37448 bins) close in one run of `lc3_sweep_test`; random stimulus needs hundreds of thousands of fetches to get there. `sequence_cg` does not close in the sweep, because JMP has only 8 encodings, so JMP→X pairs are rare; `test_top`, `lc3_base_test` and `lc3_ctrl_test` close it. Merge the UCDBs (`vcover merge`) to see the total.
+**Pipeline coverage (`imem_pipeline_coverage`).** Keeps the last three instructions. "Distance" is the number of instructions between a producer and the instruction that reads its result. Producer classes are ALU (ADD/AND/NOT), load (LD/LDR/LDI) and LEA; LEA is separate because its result leaves Execute on `pcout`, not `aluout`.
+
+| Covergroup | Bins | What it measures |
+|---|---|---|
+| `bypass_sr1_cg` | 54 | producer class × consumer (ADD, AND, NOT, LDR, STR, JMP) × distance 1–3, through SR1/BaseR |
+| `bypass_sr2_cg` | 45 | producer class × consumer (ADD, AND, ST, STR, STI) × distance 1–3, through SR2/store source |
+| `mixed_bypass_cg` | 9 | one instruction with both operands recently written: SR1 distance × SR2 distance |
+| `branch_history_cg` | 80 | what last wrote a register before a BR (class and distance 1–3, or older) × all 8 conditions |
+| `mem_pair_cg` | 108 | previous memory instruction × this one (LD, LDR, LDI, ST, STR, STI) × 0, 1 or 2 instructions between |
+| `mem_run_cg` | 5 | 1st, 2nd, 3rd, 4th, 5th-or-later memory instruction in a row |
+| `waw_cg` | 18 | two writers of the same register, by class, 1 or 2 instructions apart |
+| `chain_cg` | 5 | chains of 1, 2, 3, 4, 5+ consecutive dependent instructions |
+
+`report_phase` prints these as `IMEM_PIPELINE_COVERAGE`.
+
+**What closes what.** The nine exhaustive crosses (`alu_imm_cg` … `jmp_cg`, 37448 bins) close in one run of `lc3_sweep_test`; random stimulus needs hundreds of thousands of fetches to get there. `sequence_cg` does not close in the sweep, because JMP has only 8 encodings, so JMP→X pairs are rare; `test_top` closes it. The pipeline groups need instruction sequences the sweep does not produce, so `test_top` closes them, at `INSTRS=20000`. Merge the UCDBs (`vcover merge`) to see the total.
 
 This is the bench's only coverage. The stage-level covergroups (control, execute, memaccess, writeback) have been removed; the stage scoreboards still check every stage on every cycle.
 
@@ -169,16 +190,16 @@ cd project_benches/lc3/sim
 ./regress.sh
 ```
 
-It runs every test with a fixed seed (`make lc3_cli` cleans first, then `make lc3_batch` for the rest). Then it merges all the UCDBs with the test plan, writes an HTML report, and opens the merged database in the coverage viewer.
+It runs `test_top` (20000 fetches) and `lc3_sweep_test` with a fixed seed each (`make lc3_cli` cleans first, then `make lc3_batch`). Together they close all 27 covergroup types. The other tests (`lc3_base_test`, `lc3_alu_test`, `lc3_mem_test`, `lc3_ctrl_test`) still exist and can be run by hand. Then it merges all the UCDBs with the test plan, writes an HTML report, and opens the merged database in the coverage viewer.
 
-- Each batch run saves `<TESTNAME>_<SEED>.ucdb` and `<TESTNAME>_<SEED>.log`, and records `<TESTNAME>_<SEED>` as the UCDB test name. The plan's `test` rows link to `test_top*`, `lc3_alu_test*` and so on; the checker rows link to `*test*`, so every run counts.
+- Each batch run saves `<TESTNAME>_<SEED>.ucdb` and `<TESTNAME>_<SEED>.log`, and records `<TESTNAME>_<SEED>` as the UCDB test name. The plan's `test` rows link to `test_top*` and `lc3_sweep_test*`; the checker rows link to `*test*`, so every run counts.
 - A test whose run had any `UVM_ERROR` raises one `$error` in `report_phase`, so Questa marks that test failed in its UCDB.
 - `lc3_test_plan.xls` is the plan to edit. `xml2ucdb` reads `lc3_test_plan.xml`, the same sheet saved from Excel as **XML Spreadsheet 2003**. Re-export it after every edit.
 - Single steps: `make merge_coverage`, `make coverage_report` (writes `covhtmlreport/index.html`), `make view_coverage`. To repeat one run, use `make lc3_batch TESTNAME=lc3_mem_test SEED=1111`.
 
 ## Results to read at the end of the transcript
 
-- `IMEM_COVERAGE`: instruction coverage per covergroup and the average.
+- `IMEM_COVERAGE` and `IMEM_PIPELINE_COVERAGE`: instruction coverage per covergroup and the average.
 - Each stage environment's scoreboard summary.
 - `LC3_MEMORY_SUMMARY`: instruction- and data-memory pairs checked. The LC3 scoreboard fails if no instruction or data accesses happened, or if any are left unpaired.
 - The UVM report counts by ID.

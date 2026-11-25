@@ -7,6 +7,7 @@ package imem_pkg;
   `include "src/imem_driver.svh"
   `include "src/imem_monitor.svh"
   `include "src/imem_coverage.svh"
+  `include "src/imem_pipeline_coverage.svh"
   `include "src/imem_agent.svh"
   `include "src/imem_responder_sequence.svh"
 endpackage

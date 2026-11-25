@@ -29,6 +29,12 @@
 //                                                          -> M_Addr/Data_addr/M_Data corners
 //   INDIRECT    LDI/STI (pointers come from data memory)   -> FSM 3-1-0-3 / 3-1-2-3,
 //                                                             indirect pointer corners
+//   BYPASS_DIST producer of any class, 0-2 fillers, consumer -> bypass_sr1_cg, bypass_sr2_cg
+//   DUAL        two producers, then one instruction reading both -> mixed_bypass_cg
+//   CHAIN       producer followed by 2-6 dependent ALU instructions -> chain_cg
+//   MEM_BURST   2-6 memory instructions, 0-2 ALU between      -> mem_pair_cg, mem_run_cg
+//   BRANCH_HIST writer of any class, 0-3 NOPs, BR            -> branch_history_cg
+//   WAW         two writers of the same register             -> waw_cg
 typedef enum int {
   SNIP_RANDOM,
   SNIP_HAZARD,
@@ -36,16 +42,22 @@ typedef enum int {
   SNIP_CONST,
   SNIP_JUMP,
   SNIP_MEM_CORNER,
-  SNIP_INDIRECT
+  SNIP_INDIRECT,
+  SNIP_BYPASS_DIST,
+  SNIP_DUAL,
+  SNIP_CHAIN,
+  SNIP_MEM_BURST,
+  SNIP_BRANCH_HIST,
+  SNIP_WAW
 } lc3_snippet_e;
 
 class lc3_program_generator extends uvm_object;
   `uvm_object_utils(lc3_program_generator)
 
-  localparam int NUM_SNIPPETS = 7;
+  localparam int NUM_SNIPPETS = 13;
 
   // Relative weights, indexed by lc3_snippet_e. Tests may change them.
-  int unsigned         weight        [NUM_SNIPPETS]  = '{30, 25, 15, 8, 6, 8, 8};
+  int unsigned         weight        [NUM_SNIPPETS]  = '{30, 25, 15, 8, 6, 8, 8, 18, 8, 8, 10, 14, 6};
 
   int unsigned         snippet_count [NUM_SNIPPETS];
   int unsigned         words_emitted;
@@ -69,7 +81,7 @@ class lc3_program_generator extends uvm_object;
     return w;
   endfunction
 
-  // "30,25,15,8,6,8,8" -> weights in lc3_snippet_e order (missing entries keep
+  // "30,25,15,8,6,8,8,18,8,8,10,14,6" -> weights in lc3_snippet_e order (missing entries keep
   // their value). Used for the +LC3_MIX plusarg.
   function void apply_mix(string mix);
     int unsigned idx = 0;
@@ -83,7 +95,7 @@ class lc3_program_generator extends uvm_object;
     end
   endfunction
 
-  // Reads +LC3_MIX=<w0,...,w6> if present.
+  // Reads +LC3_MIX=<w0,...,w12> if present.
   function void apply_plusargs();
     string mix;
     if ($value$plusargs("LC3_MIX=%s", mix)) apply_mix(mix);
@@ -109,6 +121,13 @@ class lc3_program_generator extends uvm_object;
   protected function bit [2:0] rreg_except(bit [2:0] r);
     bit [2:0] x;
     do x = rreg(); while (x == r);
+    return x;
+  endfunction
+
+  // A register other than a and b.
+  protected function bit [2:0] rreg_not2(bit [2:0] a, bit [2:0] b);
+    bit [2:0] x;
+    do x = rreg(); while (x == a || x == b);
     return x;
   endfunction
 
@@ -170,6 +189,46 @@ class lc3_program_generator extends uvm_object;
       0:       return lc3_isa::ld(dr, roff9());
       1:       return lc3_isa::ldr(dr, rreg(), roff6());
       default: return lc3_isa::ldi(dr, roff9());
+    endcase
+  endfunction
+
+  // Producer of the requested class writing dr: 0 ALU, 1 load, 2 LEA.
+  protected function bit [15:0] producer_into(int cls, bit [2:0] dr);
+    case (cls)
+      0:       return alu_into(dr);
+      1:       return load_into(dr);
+      default: return lc3_isa::lea(dr, roff9());
+    endcase
+  endfunction
+
+  // ADD/AND/NOT that reads src through sr1 (slot 0) or sr2 (slot 1) and writes dr,
+  // so a chain of them keeps depending on the one before.
+  protected function bit [15:0] alu_consumer(bit [2:0] src, bit [2:0] dr, int slot);
+    bit [2:0] o = rreg_except(src);
+    if (slot == 0) begin
+      case ($urandom_range(0, 4))
+        0:       return lc3_isa::add_r(dr, src, o);
+        1:       return lc3_isa::add_i(dr, src, rimm5());
+        2:       return lc3_isa::and_r(dr, src, o);
+        3:       return lc3_isa::and_i(dr, src, rimm5());
+        default: return lc3_isa::not_r(dr, src);
+      endcase
+    end
+    else begin
+      if ($urandom_range(0, 1)) return lc3_isa::add_r(dr, o, src);
+      else return lc3_isa::and_r(dr, o, src);
+    end
+  endfunction
+
+  // Memory instruction of kind 0 LD, 1 LDR, 2 LDI, 3 ST, 4 STR, 5 STI.
+  protected function bit [15:0] mem_of_kind(int kind);
+    case (kind)
+      0:       return lc3_isa::ld(rreg(), roff9());
+      1:       return lc3_isa::ldr(rreg(), rreg(), roff6());
+      2:       return lc3_isa::ldi(rreg(), roff9());
+      3:       return lc3_isa::st(rreg(), roff9());
+      4:       return lc3_isa::str(rreg(), rreg(), roff6());
+      default: return lc3_isa::sti(rreg(), roff9());
     endcase
   endfunction
 
@@ -393,6 +452,80 @@ class lc3_program_generator extends uvm_object;
     end
   endfunction
 
+  // Producer of every class, then a consumer 1, 2 or 3 instructions later.
+  protected function void snip_bypass_dist();
+    bit [2:0] dr  = rreg();
+    int       gap = $urandom_range(0, 2);
+    pending.push_back(producer_into($urandom_range(0, 2), dr));
+    repeat (gap) pending.push_back(alu_into(rreg_except(dr)));
+    pending.push_back(consumer(dr, $urandom_range(0, 2)));
+  endfunction
+
+  // Two producers, then one instruction that reads one register from each: both
+  // operands bypassed at once, from different distances.
+  protected function void snip_dual();
+    bit [2:0] a = rreg();
+    bit [2:0] b = rreg_except(a);
+    bit [2:0] x, y;
+    int       gaps = $urandom_range(0, 2);
+    pending.push_back(producer_into($urandom_range(0, 2), a));
+    if (gaps == 1) pending.push_back(alu_into(rreg_not2(a, b)));
+    pending.push_back(producer_into($urandom_range(0, 2), b));
+    if (gaps == 2) pending.push_back(alu_into(rreg_not2(a, b)));
+    x = $urandom_range(0, 1) ? a : b;
+    y = (x == a) ? b : a;
+    case ($urandom_range(0, 2))
+      0:       pending.push_back(lc3_isa::add_r(rreg(), x, y));
+      1:       pending.push_back(lc3_isa::and_r(rreg(), x, y));
+      default: pending.push_back(lc3_isa::str(y, x, roff6()));
+    endcase
+  endfunction
+
+  // A producer followed by 2 to 6 ALU instructions, each reading the one before.
+  protected function void snip_chain();
+    bit [2:0] cur = rreg();
+    bit [2:0] nxt;
+    pending.push_back(producer_into($urandom_range(0, 2), cur));
+    repeat ($urandom_range(2, 6)) begin
+      nxt = rreg();
+      pending.push_back(alu_consumer(cur, nxt, $urandom_range(0, 1)));
+      cur = nxt;
+    end
+    if ($urandom_range(0, 2) == 0) pending.push_back(lc3_isa::str(cur, rreg(), roff6()));
+  endfunction
+
+  // 2 to 6 memory instructions of random kinds, separated by 0, 1 or 2 ALU instructions.
+  protected function void snip_mem_burst();
+    int n = $urandom_range(2, 6);
+    int gap;
+    for (int i = 0; i < n; i++) begin
+      pending.push_back(mem_of_kind($urandom_range(0, 5)));
+      if (i != n - 1) begin
+        gap = ($urandom_range(0, 3) < 2) ? 0 : $urandom_range(1, 2);
+        repeat (gap) pending.push_back(alu_into(rreg()));
+      end
+    end
+  endfunction
+
+  // A register writer of any class, 0 to 3 NOPs, then a BR with any condition. With 3 NOPs
+  // the writer is out of the 3-instruction window, which is the "older" bin.
+  protected function void snip_branch_hist();
+    bit [2:0] nzp = 3'($urandom);
+    bit [8:0] off = roff9();
+    pending.push_back(producer_into($urandom_range(0, 2), rreg()));
+    repeat ($urandom_range(0, 3)) pending.push_back(lc3_isa::nop());
+    if (nzp == 3'b000 && off == 9'd0) off = 9'd1;  // never 0x0000
+    pending.push_back(lc3_isa::br(nzp, off));
+  endfunction
+
+  // Two writers of the same register, 0 or 1 unrelated instruction apart.
+  protected function void snip_waw();
+    bit [2:0] dr = rreg();
+    pending.push_back(producer_into($urandom_range(0, 2), dr));
+    if ($urandom_range(0, 1)) pending.push_back(alu_into(rreg_except(dr)));
+    pending.push_back(producer_into($urandom_range(0, 2), dr));
+  endfunction
+
   // ---------------------------------------------------------------------------
   // Refill
   // ---------------------------------------------------------------------------
@@ -413,13 +546,19 @@ class lc3_program_generator extends uvm_object;
     s = pick();
     snippet_count[s]++;
     case (s)
-      SNIP_RANDOM:     snip_random();
-      SNIP_HAZARD:     snip_hazard();
-      SNIP_BRANCH:     snip_branch();
-      SNIP_CONST:      snip_const();
-      SNIP_JUMP:       snip_jump();
-      SNIP_MEM_CORNER: snip_mem_corner();
-      default:         snip_indirect();
+      SNIP_RANDOM:      snip_random();
+      SNIP_HAZARD:      snip_hazard();
+      SNIP_BRANCH:      snip_branch();
+      SNIP_CONST:       snip_const();
+      SNIP_JUMP:        snip_jump();
+      SNIP_MEM_CORNER:  snip_mem_corner();
+      SNIP_INDIRECT:    snip_indirect();
+      SNIP_BYPASS_DIST: snip_bypass_dist();
+      SNIP_DUAL:        snip_dual();
+      SNIP_CHAIN:       snip_chain();
+      SNIP_MEM_BURST:   snip_mem_burst();
+      SNIP_BRANCH_HIST: snip_branch_hist();
+      default:          snip_waw();
     endcase
   endfunction
 endclass : lc3_program_generator
